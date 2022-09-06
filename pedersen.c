@@ -26,49 +26,99 @@ randomnumber() {
 static void
 randomhash(Hash hash) {
 
-    for ( size_t i = 0, n = sizeof(Hash) / sizeof(unsigned long); i < n; ++i ) {
-        unsigned long v = randomnumber();
-        memcpy(hash + (i * sizeof(unsigned long)), &v, sizeof(v));
+    FILE * f = fopen("/dev/urandom", "r");
+    if ( !f ) {
+        return;
     }
+
+    fread(hash, 1, sizeof(Hash), f);
+    fclose(f);
 }
+
+#define in_count 2
+#define out_count 2
 
 signed
 main (void) {
 
-    unsigned long values[4] = {0};
-    for ( size_t i = 0; i < 2; ++i ) {
-        values[i] = randomnumber() % UINT_MAX;
-    }
-    values[2] = (values[0] + values[1]) / 2;
-    values[3] = (values[0] + values[1]) - values[2];
-
-    Hash blinds[4] = {{0}};
-    for ( size_t i = 0; i < 3; ++i ) {
-        randomhash(blinds[i]);
+    // roll input values and blinding factors
+    unsigned long in_sum = 0;
+    unsigned long in_vals[in_count] = {0};
+    for ( size_t i = 0; i < in_count; ++i ) {
+        in_vals[i] = randomnumber() % UINT_MAX;
+        in_sum += in_vals[i];
     }
 
-    const unsigned char * b_ptrs [] = { blinds[0], blinds[1], blinds[2] };
+    Hash in_blinds[in_count] = {{0}};
+    for ( size_t i = 0; i < in_count; ++i ) {
+        randomhash(in_blinds[i]);
+    }
+
+    // calculate balanced output values
+    unsigned long out_sum = 0;
+    unsigned long out_vals[out_count] = {0};
+    for ( size_t i = 0; i < out_count - 1; ++i ) {
+        out_vals[i] = in_sum / out_count;
+        out_sum += out_vals[i];
+    };
+
+    out_vals[out_count - 1] = in_sum - out_sum;
+    out_sum += out_vals[out_count - 1];
+
+    // roll all but last output blinding factor
+    Hash out_blinds[out_count] = {{0}};
+    for ( size_t i = 0; i < out_count - 1; ++i ) {
+        randomhash(out_blinds[i]);
+    }
+
+    // collect all rolled blinding factors
+    const unsigned char * b_ptrs [in_count + out_count - 1] = {0};
+    for ( size_t i = 0; i < in_count; ++i ) {
+        b_ptrs[i] = in_blinds[i];
+    }
+    for ( size_t i = 0; i < out_count - 1; ++i ) {
+        b_ptrs[i + in_count] = out_blinds[i];
+    }
 
     secp256k1_context * s_ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
     secp256k1_context * v_ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
 
-    if ( !secp256k1_pedersen_blind_sum(s_ctx, blinds[3], b_ptrs, 3, 2) ) {
+    // calculate last blinding factor
+    if ( !secp256k1_pedersen_blind_sum(s_ctx, out_blinds[out_count - 1], b_ptrs, in_count + out_count - 1, in_count) ) {
         goto cleanup;
     }
 
-    secp256k1_pedersen_commitment commits[4] = {0};
-    for ( size_t i = 0; i < 4; ++i ) {
-        unsigned long v = values[i];
-        const unsigned char * r = blinds[i];
-        if ( !secp256k1_pedersen_commit(s_ctx, &commits[i], r, v, secp256k1_generator_h) ) {
+    // make commitments
+    secp256k1_pedersen_commitment in_commits[in_count] = {0};
+    for ( size_t i = 0; i < in_count; ++i ) {
+        unsigned long v = in_vals[i];
+        const unsigned char * r = in_blinds[i];
+        if ( !secp256k1_pedersen_commit(s_ctx, &in_commits[i], r, v, secp256k1_generator_h) ) {
             goto cleanup;
         }
     }
 
-    const secp256k1_pedersen_commitment * p_ptrs [] = { &commits[0], &commits[1] };
-    const secp256k1_pedersen_commitment * n_ptrs [] = { &commits[2], &commits[3] };
+    secp256k1_pedersen_commitment out_commits[out_count] = {0};
+    for ( size_t i = 0; i < out_count; ++i ) {
+        unsigned long v = out_vals[i];
+        const unsigned char * r = out_blinds[i];
+        if ( !secp256k1_pedersen_commit(s_ctx, &out_commits[i], r, v, secp256k1_generator_h) ) {
+            goto cleanup;
+        }
+    }
 
-    if ( !secp256k1_pedersen_verify_tally(v_ctx, p_ptrs, 2, n_ptrs, 2) ) {
+    const secp256k1_pedersen_commitment * in_ptrs [in_count] = {0};
+    for ( size_t i = 0; i < in_count; ++i ) {
+        in_ptrs[i] = &in_commits[i];
+    }
+
+    const secp256k1_pedersen_commitment * out_ptrs [out_count] = {0};
+    for ( size_t i = 0; i < out_count; ++i ) {
+        out_ptrs[i] = &out_commits[i];
+    }
+
+    // verify balance
+    if ( !secp256k1_pedersen_verify_tally(v_ctx, in_ptrs, in_count, out_ptrs, out_count) ) {
         goto cleanup;
     }
 
