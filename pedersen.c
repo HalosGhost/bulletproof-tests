@@ -35,6 +35,8 @@ randomhash(Hash hash) {
     fclose(f);
 }
 
+// uncomment next line to test spending minted inputs
+//#define minted_inputs
 #define in_count 2
 #define out_count 2
 
@@ -51,7 +53,9 @@ main (void) {
 
     Hash in_blinds[in_count] = {{0}};
     for ( size_t i = 0; i < in_count; ++i ) {
+        #ifndef minted_inputs
         randomhash(in_blinds[i]);
+        #endif
     }
 
     // calculate balanced output values
@@ -87,6 +91,17 @@ main (void) {
     if ( !secp256k1_pedersen_blind_sum(s_ctx, out_blinds[out_count - 1], b_ptrs, in_count + out_count - 1, in_count) ) {
         goto cleanup;
     }
+
+    #if defined(minted_inputs) && out_count == 2
+    {
+        Hash negated = {0};
+        memcpy(negated, out_blinds[0], sizeof(Hash));
+        secp256k1_ec_seckey_negate(s_ctx, negated);
+        if ( memcmp(out_blinds[1], negated, sizeof(Hash)) ) {
+            goto cleanup;
+        }
+    }
+    #endif
 
     // make commitments
     secp256k1_pedersen_commitment in_commits[in_count] = {0};
